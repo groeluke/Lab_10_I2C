@@ -1,7 +1,7 @@
     ; Luke Groesbeck
     ; RCET3375
-    ; EEPROM
-    ; https://github.com/groeluke/Lab_9_EEPROM/tree/main/LAB_9_Part_1_EEPROM.X
+    ; I2C
+    ; https://github.com/groeluke/Lab_10_I2C/tree/main/LAB_10_Part_1_I2C.X
     ; Linker code = -Wl,-presetVect=0000h,-pisrVect=0004h,-pcode=0008h
 ; PIC16F883 Configuration Bit Settings
 ; Assembly source line config statements
@@ -24,10 +24,7 @@
 
 ; config statements should precede project file includes.
 #include <xc.inc>
-  Pending     EQU 0x70    ;the letter being picked right now: 'A' (0x41) or 'B' (0x42)
-  Display     EQU 0x71    ;the letter we are about to show
-  DelayInner  EQU 0x72    ;counts down inside the 1 ms wait
-  DelayOuter  EQU 0x73    ;counts down how many 1 ms waits are left
+  SlaveAddress     EQU 0x40    ;0x20 shefited left, plus R/W = 0 (Write)
   
 ; Reset Vector at 0000h. Execution starts here after reset.
 PSECT resetVect,class=CODE,delta=2
@@ -47,137 +44,72 @@ Setup:
     CLRF    ANSEL         ;make every pin a normal digital pin
     CLRF    ANSELH        ;RB0 and RB1 can also be analog pins, so this matters
     ;       Bank 1
-    BANKSEL OPTION_REG
-    BCF     OPTION_REG,7  ;turn on the built-in pull-up resistors for PORTB
-    MOVLW   0b00000011
-    MOVWF   WPUB          ;use the pull-ups on RB0 and RB1 only
-    BSF     TRISB,0       ;RB0 is an input (Select button)
-    BSF     TRISB,1       ;RB1 is an input (Write button)
-    BCF     TRISA,1       ;RA1 is an output (read marker)
-    BCF     TRISA,2       ;RA2 is an output (write marker)
-    CLRF    TRISC         ;all of PORTC is an output (the display)
+    BANKSEL TRISA
+    BCF     TRISA,0       ;RA0 is an output (NACK indicator)
+    BCF     TRISA,1       ;RA1 is an output (timer diagnostic)
+    BSF     TRISC,3       ;RC3 is an input for SCL (for I2C)
+    BSF     TRISC,4       ;RC$ is an input for SDA (for I2C)
+    MOVLW   9
+    MOVWF   SSPADD        ;100k Hz clock
+    MOVLW   0b10000000
+    MOVWF   SSPSTAT       ;set the Sample bit high for normal speed mode at 100k Hz
+    CLRF    SSPCON2       ;set the register low so no START/STOP is running
+    MOVLW   249
+    MOVWF   PR2           ;Timer2 counts 250 steps
     ;       Bank 0
     BANKSEL PORTA
     CLRF    PORTA         ;both markers start LOW
     CLRF    PORTC         ;display starts blank
-    MOVLW   0x41
-    MOVWF   Pending       ;the pick starts out as 'A'
+    MOVLW   0b00101000    
+    MOVWF   SSPCON        ;set I2C on master mode and Enable the serial port pins SDA and SCL
+    MOVLW   0b01001101
+    MOVWF   T2CON         ;turn Timer2 ON, flag every 10ms
     
-; MAIN LOOP: read the stored letter and show it, over and over.
-; If the Write button is pressed, go and pick a new letter instead.
+; MAIN LOOP one address probe every 10 ms
 Main:
-    CALL    EepromRead    ;the stored value comes back in W
-    MOVWF   Display
-    XORLW   0x41          ;is it A
-    BTFSC   STATUS,2
-    GOTO    ShowStored    ;if yes show it
-    MOVF    Display,W
-    XORLW   0x42          ;is it B
-    BTFSC   STATUS,2
-    GOTO    ShowStored    ;if yes show it
-    MOVLW   0x3F          ;it is neither, so show a question mark
-    MOVWF   Display
-ShowStored:
-    MOVF    Display,W
-    CALL    DisplayLetter ;put the letter on the display
+    BTFSS   PIR1,1        ;has the timer flag (TMR2IF) been set?
+    GOTO    Main          ;no - keep waiting
+    BCF     PIR1,1        ;yes - clear the flag
 
-    BTFSC   PORTB,1       ;is the Write button pressed? (LOW = pressed)
-    GOTO    Main          ;if not keep reading
-    CALL    Wait10ms      ;if yes then wait 10 ms to make sure it is not just bounce
-    BTFSC   PORTB,1       ;verify that it is still pressed
-    GOTO    Main          ;if not it was only bounce, so ignore it
-;PICK A LETTER: we stay here while the Write button is held down.
-;The display shows the pick. The EEPROM is NOT touched in here.
-Selecting:
-    MOVF    Pending,W
-    CALL    DisplayLetter ;show the letter we are picking
-    BTFSS   PORTB,1       ;has the Write button been let go? (HIGH = released)
-    GOTO    CheckSelect   ;if not still held then look at the Select button
-    CALL    Wait10ms      ;if it looks released then wait 10 ms to make sure
-    BTFSC   PORTB,1       ;is it still released
-    GOTO    SaveIt        ;yes, it is a real release, so save the letter
-                          ;no, it bounced back down, so carry on picking
-CheckSelect:
-    BTFSC   PORTB,0       ;is the Select button pressed? (LOW = pressed)
-    GOTO    Selecting     ;if no keep waiting
-    CALL    Wait10ms      ;if yes then wait 10 ms to make sure it is not bounce
-    BTFSC   PORTB,0       ;is it still pressed?
-    GOTO    Selecting     ;if no then it was only bounce, so ignore it
-    MOVLW   0x03
-    XORWF   Pending,F     ;switch the pick: 'A' becomes 'B', 'B' becomes 'A'
-    MOVF    Pending,W
-    CALL    DisplayLetter ;show the new pick right away
-WaitSelectUp:
-    BTFSS   PORTB,0       ;wait here until the Select button is let go
-    GOTO    WaitSelectUp
-    CALL    Wait10ms      ;let any bounce on the release settle
-    GOTO    Selecting
-;SAVE: the Write button was pressed, then properly released.
-;This is the ONLY place the EEPROM is ever written.
-SaveIt:
-    CALL    EepromWrite   ;store the pick, one time
-    GOTO    Main          ;back to showing what is stored
-;EepromRead: reads address 0 and hands the value back in W.
-;RA1 goes HIGH only for the read itself, not for the display.
-EepromRead:
-    BSF     PORTA,1       ;read marker ON
-    BANKSEL EEADR
-    CLRF    EEADR         ;the address we want is 0
-    BANKSEL EECON1
-    BCF     EECON1,7      ;pick data EEPROM (not program memory)
-    BSF     EECON1,0      ;start the read
-    BANKSEL EEDATA
-    MOVF    EEDATA,W      ;the value is ready, so copy it into W
-    BANKSEL PORTA         ;go back to bank 0 (this does not change W)
-    BCF     PORTA,1       ;read marker OFF
-    RETURN
-;EepromWrite: stores 'pending' at address 0 and waits until the chip
-;says it is finished. RA2 is HIGH the whole time.
-EepromWrite:
-    BSF     PORTA,2       ;write marker ON
-    BANKSEL EEADR
-    CLRF    EEADR         ;the address to write is 0
-    MOVF    Pending,W
-    MOVWF   EEDATA        ;the letter to store
-    BANKSEL EECON1
-    BCF     EECON1,7      ;pick data EEPROM
-    BSF     EECON1,2      ;allow writing
-    BCF     INTCON,7      ;make sure no interrupt can get in the way of the next lines
-    MOVLW   0x55          ;the chip needs this exact code, in this exact order,
-    MOVWF   EECON2        ;with nothing in between, or it ignores the write
-    MOVLW   0xAA
-    MOVWF   EECON2
-    BSF     EECON1,1      ;start the write
-WaitWrite:
-    BTFSC   EECON1,1      ;the chip clears this bit when it is finished
-    GOTO    WaitWrite     ;if it is still writing then wait
-    BCF     EECON1,2      ;turn writing off again so nothing can write by accident
-    BANKSEL PIR2
-    BCF     PIR2,4        ;clear the "write finished" flag
+    BSF     PORTA,1       ;RA1 HIGH: a new transaction starts
+    CALL    AddressProbe  ;START, address, check ACK, STOP
+    BCF     PORTA,1       ;RA1 LOW: the STOP is finished
+    GOTO    Main
+
+; AddressProbe send START, the address byte, look at ACK, send STOP.
+AddressProbe:
     BANKSEL PORTA
-    BCF     PORTA,2       ;write marker OFF
+    BCF     PORTA,0       ;clear the NACK indicator
+
+    BANKSEL SSPCON2
+    BSF     SSPCON2,0     ;SEN = 1: generate a START
+WaitStart:
+    BTFSC   SSPCON2,0     ;SEN goes back to 0 when START is done
+    GOTO    WaitStart
+
+    BANKSEL PIR1
+    BCF     PIR1,3        ;clear SSPIF (START also sets it)
+    MOVLW   SlaveAddress
+    MOVWF   SSPBUF        ;sending this byte starts the 9 clocks
+WaitSend:
+    BTFSS   PIR1,3        ;SSPIF = 1 after the 9th clock
+    GOTO    WaitSend
+    BCF     PIR1,3        ;clear it again
+
+    BANKSEL SSPCON2
+    BTFSS   SSPCON2,6     ;ACKSTAT: 0 = ACK, 1 = NACK
+    GOTO    SendStop      ;ACK - go straight to STOP
+    BANKSEL PORTA
+    BSF     PORTA,0       ;NACK - turn the RA0 indicator ON
+    BANKSEL SSPCON2
+
+SendStop:
+    BSF     SSPCON2,2     ;PEN = 1: generate a STOP
+WaitStop:
+    BTFSC   SSPCON2,2     ;PEN goes back to 0 when STOP is done
+    GOTO    WaitStop
+
+    BANKSEL PORTA         ;back to bank 0
     RETURN
-;DisplayLetter: the letter to show is in W. Same idea as Lab 2:
-;the display takes plain ASCII on PORTC, so we just write it there.
-DisplayLetter:
-    BANKSEL PORTC         ;make sure we are in bank 0 (W is not changed)
-    MOVWF   PORTC         ;send the letter to the display
-    RETURN
-;Wait10ms: waits about 10 ms by doing the 1 ms wait 10 times.
-Wait10ms:
-    MOVLW   10
-    MOVWF   DelayOuter    ;do the 1 ms wait 10 times
-Wait10Loop:
-    CALL    Wait1ms
-    DECFSZ  DelayOuter,F  ;one fewer left, stop when it hits zero
-    GOTO    Wait10Loop
-    RETURN
-Wait1ms:
-    MOVLW   247
-    MOVWF   DelayInner
-Wait1Loop:
-    NOP
-    DECFSZ  DelayInner,F  ;count down to zero
-    GOTO    Wait1Loop
-    RETURN
+
     End
