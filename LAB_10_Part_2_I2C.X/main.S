@@ -141,22 +141,19 @@ Step4_Poll:
     CLRF    WriteHighByte
     CLRF    WriteLowByte       ;Lo = 0x0000
     CALL    WriteRegister
-
     MOVLW   0x03
     MOVWF   RegisterPointer    ;Hi threshold register
     MOVLW   0b10000000
     MOVWF   WriteHighByte
     CLRF    WriteLowByte       ;Hi = 0x8000
     CALL    WriteRegister
-
     MOVLW   0x01
     MOVWF   RegisterPointer    ;Config register
     MOVLW   0b01000000
     MOVWF   WriteHighByte
     MOVLW   0b10000000
     MOVWF   WriteLowByte       ;same Config, comparator queue = 00
-    CALL    WriteRegister
-
+    CALL    WriteRegiste
 PollLoop:
     BTFSS   PIR1,1             ;timer flag?
     GOTO    PollLoop
