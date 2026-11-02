@@ -1,7 +1,7 @@
     ; Luke Groesbeck
     ; RCET3375
-    ; I2C
-    ; https://github.com/groeluke/Lab_10_I2C/tree/main/LAB_10_Part_2_I2C.X
+    ; I2C Part 3 Master
+    ; https://github.com/groeluke/Lab_10_I2C/tree/main/LAB_10_Part_3_I2C.X
     ; Linker code = -Wl,-presetVect=0000h,-pisrVect=0004h,-pcode=0008h
 ; PIC16F883 Configuration Bit Settings
 ; Assembly source line config statements
@@ -82,57 +82,15 @@ Setup:
 ; Main picks one step by removing the comment ;.
 ;Step 1, 2, 3 and 5 run once, then the PIC sits in the Done loop until reprogram
 Main:
-    ;CALL    Step1_Probe       ;step 1: probe the four addresses
-    ;CALL    Step2_ReadConfig  ;step 2: read the Config register
-    ;CALL    Step3_WriteConfig ;step 3: write Config, read it back
     CALL    Step4_Poll        ;step 4: configure once, then read forever
-    CALL    Step5_AlertSetup  ;step 5: turn on ALERT/RDY pulses
 Done:
     GOTO    Done               ;do nothing
-
-; STEP 1 - probe all four addresses, one after another.
-; RA1 goes HIGH during each probe. RA0 shows that probe's result.
-Step1_Probe:
-    MOVLW   AddressGND
-    CALL    ProbeOne           ;try the GND address (0x48)
-    MOVLW   AddressVDD
-    CALL    ProbeOne           ;try the VDD address (0x49)
-    MOVLW   AddressSDA
-    CALL    ProbeOne           ;try the SDA address (0x4A)
-    MOVLW   AddressSCL
-    CALL    ProbeOne           ;try the SCL address (0x4B)
-    RETURN
-
 ProbeOne:                      ;in: W = address byte
     BSF     PORTA,1            ;RA1 HIGH: probe starts (W is not changed)
     CALL    I2C_Start          ;(W is not changed by START either)
     CALL    SendByte           ;send the address in W, RA0 = result
     CALL    I2C_Stop
     BCF     PORTA,1            ;RA1 LOW: probe finished
-    RETURN
-
-; STEP 2 - read the Config register. A new ADS1115 shows 0x8583.
-; The answer is in ReadHighByte and ReadLowByte.
-Step2_ReadConfig:
-    MOVLW   0x01
-    MOVWF   RegisterPointer    ;0x01 = Config register
-    CALL    SetPointer         ;START, ADDR+W, 0x01, STOP
-    CALL    ReadTwoBytes       ;START, ADDR+R, high, low, STOP
-    RETURN
-
-; STEP 3 - write Config, then read it back.
-; AIN0 vs GND, +/-6.144 V, continuous, 128 SPS, comparator off.
-Step3_WriteConfig:
-    MOVLW   0x01
-    MOVWF   RegisterPointer    ;Config register
-    MOVLW   0b01000000
-    MOVWF   WriteHighByte      ;Config high byte
-    MOVLW   0b10000011
-    MOVWF   WriteLowByte       ;Config low byte
-    CALL    WriteRegister      ;write it
-    CALL    ReadTwoBytes       ;pointer is still Config, so just read
-    RETURN
-
 ; STEP 4 - configure once, then read the conversion every timer tick.
 ; The answer is in ReadHighByte and ReadLowByte (signed 16-bit).
 Step4_Poll:
@@ -153,7 +111,7 @@ Step4_Poll:
     MOVWF   WriteHighByte
     MOVLW   0b10000000
     MOVWF   WriteLowByte       ;same Config, comparator queue = 00
-    CALL    WriteRegiste
+    CALL    WriteRegister
 PollLoop:
     BTFSS   PIR1,1             ;timer flag?
     GOTO    PollLoop
@@ -164,30 +122,6 @@ PollLoop:
     CALL    ReadTwoBytes       ;START, ADDR+R, high, low, STOP
     BCF     PORTA,1            ;RA1 LOW: cycle finished
     GOTO    PollLoop
-
-; STEP 5 - turn on the ALERT/RDY pulses, once.
-Step5_AlertSetup:
-    MOVLW   0x02
-    MOVWF   RegisterPointer    ;Lo threshold register
-    CLRF    WriteHighByte
-    CLRF    WriteLowByte       ;Lo = 0x0000
-    CALL    WriteRegister
-
-    MOVLW   0x03
-    MOVWF   RegisterPointer    ;Hi threshold register
-    MOVLW   0b10000000
-    MOVWF   WriteHighByte
-    CLRF    WriteLowByte       ;Hi = 0x8000
-    CALL    WriteRegister
-
-    MOVLW   0x01
-    MOVWF   RegisterPointer    ;Config register
-    MOVLW   0b01000000
-    MOVWF   WriteHighByte
-    MOVLW   0b10000000
-    MOVWF   WriteLowByte       ;same Config, comparator queue = 00
-    CALL    WriteRegister
-    RETURN
 
 ; SetPointer - START, ADDR+W, register pointer, STOP.
 ; in: RegisterPointer.  If RA0 is HIGH (NACK), it skips ahead to STOP.
