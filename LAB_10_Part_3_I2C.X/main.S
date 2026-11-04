@@ -24,21 +24,13 @@
 
 ; config statements should precede project file includes.
 #include <xc.inc>
-;ADS1115 address bytes (7-bit address shifted left, R/W = 0)
-   AddressGND     EQU 0x90     ;ADDR pin on GND  0x48
-   AddressVDD     EQU 0x92     ;ADDR pin on VDD  0x49
-   AddressSDA     EQU 0x94     ;ADDR pin on SDA  0x4A
-   AddressSCL     EQU 0x96     ;ADDR pin on SCL  0x4B
 
-;The address used for steps 2 to 5. This is ment for after Part 1
-   AddressWrite   EQU AddressGND        ;address + write bit
-   AddressRead    EQU AddressGND + 1    ;address + read bit
-
-   RegisterPointer EQU 0x70    ;which ADS1115 register to select (0x00 to 0x03)
-   WriteHighByte   EQU 0x71    ;high byte to write
-   WriteLowByte    EQU 0x72    ;low byte to write
-   ReadHighByte    EQU 0x73    ;high byte we read back
-   ReadLowByte     EQU 0x74    ;low byte we read back
+   SlaveWrite      EQU 0x40     ;slave address 0x20 with the write bit
+   SlaveRead       EQU 0x41     ;slave address 0x20 with the read bit
+   ValueToSend     EQU 0x70     ;pointer or character waiting to be sent
+   ReadByte        EQU 0x71     ;single byte read back from the slave
+   ReadHigh        EQU 0x72     ;ADC high byte read back from the slave
+   ReadLow         EQU 0x73     ;ADC low byte read back from the slave
      
 ; Reset Vector at 0000h. Execution starts here after reset.
 PSECT resetVect,class=CODE,delta=2
@@ -52,195 +44,184 @@ InterruptVector:
 ; Main code section starts at 0008h. User code goes here.
 PSECT code,class=CODE,delta=2
  
-Setup: 
+Setup:
     ;       Bank 3
-    BANKSEL ANSEL
-    CLRF    ANSEL              ;make every pin a normal digital pin
-    CLRF    ANSELH             ;RB0 and RB1 can also be analog pins, so this matters
+    BANKSEL ANSEL               ;switch to the bank that holds ANSEL
+    CLRF    ANSEL               ;every pin is digital
+    CLRF    ANSELH              ;every pin is digital
     ;       Bank 1
-    BANKSEL TRISA
-    BCF     TRISA,0            ;RA0 is an output (NACK indicator)
-    BCF     TRISA,1            ;RA1 is an output (timer diagnostic)
-    BSF     TRISC,3            ;RC3 is an input for SCL (for I2C)
-    BSF     TRISC,4            ;RC4 is an input for SDA (for I2C)
-    MOVLW   9
-    MOVWF   SSPADD             ;100k Hz clock
-    MOVLW   0b10000000
-    MOVWF   SSPSTAT            ;set the Sample bit high for normal speed mode at 100k Hz
-    CLRF    SSPCON2            ;set the register low so no START/STOP is running
-    MOVLW   255
-    MOVWF   PR2                ;Timer2 counts 250 steps
+    BANKSEL TRISA               ;switch to the bank that holds the TRIS registers
+    BCF     TRISA,0             ;RA0 is an output (NACK indicator)
+    BCF     TRISA,1             ;RA1 is an output (scope trigger)
+    BSF     TRISC,3             ;RC3 = SCL must be an input
+    BSF     TRISC,4             ;RC4 = SDA must be an input
+    MOVLW   9                   ;SSPADD = 9 gives 100 kHz at 4 MHz
+    MOVWF   SSPADD              ;write it to SSPADD
+    MOVLW   0b10000000          ;SMP = 1 for 100 kHz standard speed
+    MOVWF   SSPSTAT             ;write it to SSPSTAT
+    CLRF    SSPCON2             ;clear the I2C control bits
+    MOVLW   249                 ;Timer2 counts 0 to 249
+    MOVWF   PR2                 ;write it to PR2
     ;       Bank 0
-    BANKSEL PORTA
-    CLRF    PORTA              ;both markers start LOW
-    CLRF    PORTC              ;starts blank
-    MOVLW   0b00101000    
-    MOVWF   SSPCON             ;set I2C on master mode and Enable the serial port pins SDA and SCL
-    MOVLW   0b01001101
-    MOVWF   T2CON              ;turn Timer2 ON, flag every 10ms
+    BANKSEL PORTA               ;back to bank 0
+    CLRF    PORTA               ;both indicator pins start low
+    MOVLW   0b00101000          ;MSSP on, I2C master mode
+    MOVWF   SSPCON              ;write it to SSPCON
+    MOVLW   0b01001101          ;Timer2 on, 1:4 prescale, 1:10 postscale = 10 ms tick
+    MOVWF   T2CON               ;write it to T2CON
 
-; Main picks one step by removing the comment ;.
-;Step 1, 2, 3 and 5 run once, then the PIC sits in the Done loop until reprogram
 Main:
-    CALL    Step4_Poll        ;step 4: configure once, then read forever
-Done:
-    GOTO    Done               ;do nothing
-ProbeOne:                      ;in: W = address byte
-    BSF     PORTA,1            ;RA1 HIGH: probe starts (W is not changed)
-    CALL    I2C_Start          ;(W is not changed by START either)
-    CALL    SendByte           ;send the address in W, RA0 = result
-    CALL    I2C_Stop
-    BCF     PORTA,1            ;RA1 LOW: probe finished
-; STEP 4 - configure once, then read the conversion every timer tick.
-; The answer is in ReadHighByte and ReadLowByte (signed 16-bit).
-Step4_Poll:
-   MOVLW   0x02
-    MOVWF   RegisterPointer    ;Lo threshold register
-    CLRF    WriteHighByte
-    CLRF    WriteLowByte       ;Lo = 0x0000
-    CALL    WriteRegister
-    MOVLW   0x03
-    MOVWF   RegisterPointer    ;Hi threshold register
-    MOVLW   0b10000000
-    MOVWF   WriteHighByte
-    CLRF    WriteLowByte       ;Hi = 0x8000
-    CALL    WriteRegister
-    MOVLW   0x01
-    MOVWF   RegisterPointer    ;Config register
-    MOVLW   0b01000000
-    MOVWF   WriteHighByte
-    MOVLW   0b10000000
-    MOVWF   WriteLowByte       ;same Config, comparator queue = 00
-    CALL    WriteRegister
-PollLoop:
-    BTFSS   PIR1,1             ;timer flag?
-    GOTO    PollLoop
-    BCF     PIR1,1             ;clear it
-    BSF     PORTA,1            ;RA1 HIGH: a cycle starts
-    CLRF    RegisterPointer    ;0x00 = Conversion register
-    CALL    SetPointer         ;START, ADDR+W, 0x00, STOP
-    CALL    ReadTwoBytes       ;START, ADDR+R, high, low, STOP
-    BCF     PORTA,1            ;RA1 LOW: cycle finished
-    GOTO    PollLoop
+    BANKSEL PIR1                ;Bank 0
+    BTFSS   PIR1,1              ;has Timer2 counted 10 ms (TMR2IF)?
+    GOTO    Main                ;no - keep waiting
+    BCF     PIR1,1              ;clear the flag
+    BCF     PORTA,0             ;clear the NACK indicator
+    BSF     PORTA,1             ;RA1 high = transaction running (scope trigger)
+;uncomment ONE step at a time
+    ;CALL    Step3_EchoA5       ;step 3: select 0xA5, read it back (slave echo must be on)
+    ;CALL    Step3_Echo3C       ;step 3: select 0x3C, read it back
+    CALL    Step4_Switches     ;step 4: select 0x00, read the six switches
+    ;CALL    Step4_Status       ;step 4: select 0x04, read the status byte
+    ;CALL    Step5_DisplayA     ;step 5: write 'A' to the display
+    ;CALL    Step5_DisplayB     ;step 5: write 'B' to the display
+    CALL    Step6_Adc          ;step 6: select 0x02, read two ADC bytes
 
-; SetPointer - START, ADDR+W, register pointer, STOP.
-; in: RegisterPointer.  If RA0 is HIGH (NACK), it skips ahead to STOP.
-SetPointer:
-    CALL    I2C_Start
-    MOVLW   AddressWrite
-    CALL    SendByte           ;address + write
-    BTFSC   PORTA,0            ;NACK?
-    GOTO    SetPointerDone     ;yes - stop sending
-    MOVF    RegisterPointer,W
-    CALL    SendByte           ;the register pointer
-SetPointerDone:
-    CALL    I2C_Stop
-    RETURN
+    BCF     PORTA,1             ;RA1 low = transaction finished
+    GOTO    Main                ;wait for the next tick
 
-; WriteRegister - START, ADDR+W, pointer, high byte, low byte, STOP.
-; in: RegisterPointer, WriteHighByte, WriteLowByte
-; Stops sending at the first NACK (RA0 HIGH).
-WriteRegister:
-    CALL    I2C_Start
-    MOVLW   AddressWrite
-    CALL    SendByte           ;address + write
-    BTFSC   PORTA,0
-    GOTO    WriteRegisterDone
-    MOVF    RegisterPointer,W
-    CALL    SendByte           ;register pointer
-    BTFSC   PORTA,0
-    GOTO    WriteRegisterDone
-    MOVF    WriteHighByte,W
-    CALL    SendByte           ;high byte
-    BTFSC   PORTA,0
-    GOTO    WriteRegisterDone
-    MOVF    WriteLowByte,W
-    CALL    SendByte           ;low byte
-WriteRegisterDone:
-    CALL    I2C_Stop
-    RETURN
-    
-; ReadTwoBytes - START, ADDR+R, high (PIC ACK), low (PIC NACK), STOP.
-; out: ReadHighByte, ReadLowByte
+;Steps
+Step3_EchoA5:
+    MOVLW   0xA5                ;pointer value 0xA5
+    CALL    SelectPointer       ;write the pointer to the slave
+    CALL    ReadOneByte         ;ReadByte should now be 0xA5
+    RETURN                      ;done
+
+Step3_Echo3C:
+    MOVLW   0x3C                ;pointer value 0x3C
+    CALL    SelectPointer       ;write the pointer to the slave
+    CALL    ReadOneByte         ;ReadByte should now be 0x3C
+    RETURN                      ;done
+
+Step4_Switches:
+    MOVLW   0x00                ;pointer 0x00 = PORTB switches
+    CALL    SelectPointer       ;write the pointer to the slave
+    CALL    ReadOneByte         ;ReadByte = switch pattern (bits 5:0)
+    RETURN                      ;done
+
+Step4_Status:
+    MOVLW   0x04                ;pointer 0x04 = device status
+    CALL    SelectPointer       ;write the pointer to the slave
+    CALL    ReadOneByte         ;ReadByte = status byte
+    RETURN                      ;done
+
+Step5_DisplayA:
+    MOVLW   0x41                ;ASCII 'A'
+    CALL    WriteCharacter      ;send pointer 0x01 and the character
+    RETURN                      ;done
+
+Step5_DisplayB:
+    MOVLW   0x42                ;ASCII 'B'
+    CALL    WriteCharacter      ;send pointer 0x01 and the character
+    RETURN                      ;done
+
+Step6_Adc:
+    MOVLW   0x02                ;pointer 0x02 = ADC on AN2
+    CALL    SelectPointer       ;write the pointer to the slave
+    CALL    ReadTwoBytes        ;ReadHigh and ReadLow hold the 10-bit result
+    RETURN                      ;done
+
+;Transactions
+SelectPointer:                  ;W = pointer value
+    MOVWF   ValueToSend         ;keep the pointer
+    CALL    Start               ;START
+    MOVLW   SlaveWrite          ;0x40 = slave address + write
+    CALL    Send                ;send the address
+    MOVF    ValueToSend,W       ;load the pointer
+    CALL    Send                ;send the pointer
+    CALL    Stop                ;STOP (the slave keeps the pointer)
+    RETURN                      ;done
+
+WriteCharacter:                 ;W = ASCII character
+    MOVWF   ValueToSend         ;keep the character
+    CALL    Start               ;START
+    MOVLW   SlaveWrite          ;0x40 = slave address + write
+    CALL    Send                ;send the address
+    MOVLW   0x01                ;pointer 0x01 = display
+    CALL    Send                ;send the pointer
+    MOVF    ValueToSend,W       ;load the character
+    CALL    Send                ;send the character
+    CALL    Stop                ;STOP
+    RETURN                      ;done
+
+ReadOneByte:
+    CALL    Start               ;START
+    MOVLW   SlaveRead           ;0x41 = slave address + read
+    CALL    Send                ;send the address
+    CALL    RecvNack            ;receive the byte, master NACKs (last byte)
+    MOVWF   ReadByte            ;save it
+    CALL    Stop                ;STOP
+    RETURN                      ;done
+
 ReadTwoBytes:
-    CALL    I2C_Start
-    MOVLW   AddressRead
-    CALL    SendByte           ;address + read
-    BTFSC   PORTA,0            ;NACK?
-    GOTO    ReadTwoBytesDone   ;yes means nothing to read
-    CALL    ReceiveByteAck     ;high byte, the PIC sends ACK
-    MOVWF   ReadHighByte
-    CALL    ReceiveByteNack    ;low byte, the PIC sends NACK
-    MOVWF   ReadLowByte
-ReadTwoBytesDone:
-    CALL    I2C_Stop
-    RETURN
+    CALL    Start               ;START
+    MOVLW   SlaveRead           ;0x41 = slave address + read
+    CALL    Send                ;send the address
+    CALL    RecvAck             ;receive the high byte, master ACKs (more to come)
+    MOVWF   ReadHigh            ;save it
+    CALL    RecvNack            ;receive the low byte, master NACKs (last byte)
+    MOVWF   ReadLow             ;save it
+    CALL    Stop                ;STOP
+    RETURN                      ;done
 
-; BASIC I2C ROUTINES (each returns in bank 0)
-; Each one clears SSPIF, starts the job, then waits for SSPIF = 1.
-I2C_Start:
-    BANKSEL PIR1
-    BCF     PIR1,3             ;clear SSPIF
-    BANKSEL SSPCON2
-    BSF     SSPCON2,0          ;generate a START
-    BANKSEL PIR1
-    CALL    WaitSSPIF
-    RETURN
+;I2C building blocks
+Start:
+    BANKSEL SSPCON2             ;Bank 1
+    BSF     SSPCON2,0           ;SEN = 1 sends a START
+    CALL    WaitFlag            ;wait until it is finished
+    RETURN                      ;done
 
-I2C_Stop:
-    BANKSEL PIR1
-    BCF     PIR1,3             ;clear SSPIF
-    BANKSEL SSPCON2
-    BSF     SSPCON2,2          ;generate a STOP
-    BANKSEL PIR1
-    CALL    WaitSSPIF
-    RETURN
+Stop:
+    BANKSEL SSPCON2             ;Bank 1
+    BSF     SSPCON2,2           ;PEN = 1 sends a STOP
+    CALL    WaitFlag            ;wait until it is finished
+    RETURN                      ;done
 
-; SendByte - sends the byte in W and checks the slave's reply.
-; RA0 HIGH = NACK, RA0 LOW = ACK.
-SendByte:
-    BANKSEL PIR1
-    BCF     PIR1,3             ;clear SSPIF
-    MOVWF   SSPBUF             ;send the byte
-    CALL    WaitSSPIF          ;wait for all 9 clocks
-    BANKSEL SSPCON2
-    BTFSS   SSPCON2,6          ;ACKSTAT: 0 = ACK, 1 = NACK
-    GOTO    SendByteAck
-    BANKSEL PORTA
-    BSF     PORTA,0            ;RA0 ON = NACK
-    RETURN
-SendByteAck:
-    BANKSEL PORTA
-    BCF     PORTA,0            ;RA0 OFF = ACK
-    RETURN
+Send:                           ;W = byte to send
+    BANKSEL SSPBUF              ;Bank 0
+    MOVWF   SSPBUF              ;sending starts when SSPBUF is written
+    CALL    WaitFlag            ;wait until the byte and the ACK slot are done
+    BANKSEL SSPCON2             ;Bank 1
+    BTFSS   SSPCON2,6           ;ACKSTAT = 0 means the slave ACKed
+    RETURN                      ;it ACKed - nothing more to do
+    BANKSEL PORTA               ;Bank 0
+    BSF     PORTA,0             ;slave NACKed - RA0 goes high
+    RETURN                      ;done
 
-; ReceiveByteAck / ReceiveByteNack - receive one byte, then send
-; ACK (Ack) or NACK (Nack). The received byte comes back in W.
-ReceiveByteAck:
-    BANKSEL SSPCON2
-    BCF     SSPCON2,5          ;ACKDT = 0: we will send ACK
-    GOTO    ReceiveByte
-ReceiveByteNack:
-    BANKSEL SSPCON2
-    BSF     SSPCON2,5          ;ACKDT = 1: we will send NACK
-ReceiveByte:
-    BANKSEL PIR1
-    BCF     PIR1,3             ;clear SSPIF
-    BANKSEL SSPCON2
-    BSF     SSPCON2,3          ;receive 8 bits
-    BANKSEL PIR1
-    CALL    WaitSSPIF          ;wait until the byte is in
-    MOVF    SSPBUF,W           ;W = the received byte (nothing below changes W)
-    BCF     PIR1,3             ;clear SSPIF again
-    BANKSEL SSPCON2
-    BSF     SSPCON2,4          ;send the ACK or NACK now
-    BANKSEL PIR1
-    CALL    WaitSSPIF          ;wait until it is sent
-    RETURN                     ;W = the received byte
+RecvNack:                       ;returns the byte in W
+    BANKSEL SSPCON2             ;Bank 1
+    BSF     SSPCON2,5           ;ACKDT = 1 means we will send a NACK
+    GOTO    Receive             ;share the receive code below
 
-WaitSSPIF:                     ;wait until SSPIF = 1 (needs bank 0)
-    BTFSS   PIR1,3
-    GOTO    WaitSSPIF
-    RETURN
+RecvAck:                        ;returns the byte in W
+    BANKSEL SSPCON2             ;Bank 1
+    BCF     SSPCON2,5           ;ACKDT = 0 means we will send an ACK
 
-    End
+Receive:
+    BSF     SSPCON2,3           ;RCEN = 1 starts receiving one byte
+    CALL    WaitFlag            ;wait until the byte has arrived
+    BANKSEL SSPCON2             ;Bank 1
+    BSF     SSPCON2,4           ;ACKEN = 1 sends the ACK or NACK
+    CALL    WaitFlag            ;wait until it has been sent
+    BANKSEL SSPBUF              ;Bank 0
+    MOVF    SSPBUF,W            ;W = the byte we received
+    RETURN                      ;done
+
+WaitFlag:                       ;waits for SSPIF, keeps W unchanged
+    BANKSEL PIR1                ;Bank 0
+WaitLoop:
+    BTFSS   PIR1,3              ;has the I2C hardware finished (SSPIF)?
+    GOTO    WaitLoop            ;no - keep waiting
+    BCF     PIR1,3              ;clear SSPIF
+    RETURN                      ;done
+
+    END
